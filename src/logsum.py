@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import csv
 import sys
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
@@ -26,8 +27,24 @@ def parse_timestamp(raw: str | None) -> datetime:
     return datetime.fromisoformat(raw.strip())
 
 
+@dataclass
+class _GroupStats:
+    count: int
+    first_seen: str
+    first_seen_dt: datetime
+    last_seen: str
+    last_seen_dt: datetime
+
+    def update(self, raw_ts: str, ts: datetime) -> None:
+        self.count += 1
+        if ts < self.first_seen_dt:
+            self.first_seen, self.first_seen_dt = raw_ts, ts
+        if ts > self.last_seen_dt:
+            self.last_seen, self.last_seen_dt = raw_ts, ts
+
+
 def summarise(reader: csv.DictReader) -> tuple[dict[tuple[str, str], dict], int]:
-    groups: dict[tuple[str, str], dict] = {}
+    groups: dict[tuple[str, str], _GroupStats] = {}
     skipped = 0
     for row in reader:
         raw_ts = row.get("timestamp")
@@ -37,24 +54,19 @@ def summarise(reader: csv.DictReader) -> tuple[dict[tuple[str, str], dict], int]
             skipped += 1
             continue
         key = (normalise_service(row.get("service")), normalise_level(row.get("level")))
-        group = groups.get(key)
-        if group is None:
-            groups[key] = {
-                "count": 1,
-                "first_seen": raw_ts,
-                "first_seen_dt": ts,
-                "last_seen": raw_ts,
-                "last_seen_dt": ts,
-            }
+        if key in groups:
+            groups[key].update(raw_ts, ts)
         else:
-            group["count"] += 1
-            if ts < group["first_seen_dt"]:
-                group["first_seen_dt"] = ts
-                group["first_seen"] = raw_ts
-            if ts > group["last_seen_dt"]:
-                group["last_seen_dt"] = ts
-                group["last_seen"] = raw_ts
-    return groups, skipped
+            groups[key] = _GroupStats(
+                count=1, first_seen=raw_ts, first_seen_dt=ts, last_seen=raw_ts, last_seen_dt=ts
+            )
+    return (
+        {
+            key: {"count": s.count, "first_seen": s.first_seen, "last_seen": s.last_seen}
+            for key, s in groups.items()
+        },
+        skipped,
+    )
 
 
 def write_summary(path: Path, groups: dict[tuple[str, str], dict]) -> None:
