@@ -38,6 +38,8 @@ service,level,count,first_seen,last_seen
 
 One row per `(service, level)` group; row order is not specified (matches
 the underlying dict/aggregation order, currently first-seen-group-first).
+Groups with `count` below the `--min-count` threshold (§7), if given, are
+omitted.
 
 ## 4. Missing level behaviour
 
@@ -66,6 +68,10 @@ logsum --input events.csv --output summary.csv
 
 - `-i / --input` (required): path to the input `events.csv`.
 - `-o / --output` (default: `summary.csv`): path to write the output.
+- `--min-count N` (optional, default: no filtering): only include groups
+  whose `count >= N` in the output. Does not affect `skipped_rows`
+  reporting. A non-integer value for `N` is a fatal error (exit `1`), same
+  as any other bad CLI argument.
 - `-h / --help`: print usage text.
 
 Exit codes:

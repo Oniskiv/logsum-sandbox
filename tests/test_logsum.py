@@ -288,3 +288,76 @@ def test_explicit_output_option_is_honoured(tmp_path):
 
     assert result.returncode == 0
     assert out.exists()
+
+
+def test_help_flag_mentions_min_count():
+    result = run_cli("-h")
+
+    assert result.returncode == 0
+    combined = (result.stdout + result.stderr).lower()
+    assert "--min-count" in combined
+
+
+# --- 9. --min-count filtering -----------------------------------------------
+
+
+def test_min_count_filters_out_smaller_groups(tmp_path):
+    out = tmp_path / "summary.csv"
+    result = run_cli(
+        "-i", str(FIXTURES / "grouping_and_normalisation.csv"), "-o", str(out), "--min-count", "2"
+    )
+
+    assert result.returncode == 0
+    groups = as_comparable(read_rows(out))
+
+    assert ("auth", "INFO") in groups
+    assert ("payments", "ERROR") in groups
+    assert ("Auth", "INFO") not in groups
+
+
+def test_min_count_zero_keeps_all_groups(tmp_path):
+    default_out = tmp_path / "default.csv"
+    zero_out = tmp_path / "zero.csv"
+    default_result = run_cli(
+        "-i", str(FIXTURES / "grouping_and_normalisation.csv"), "-o", str(default_out)
+    )
+    zero_result = run_cli(
+        "-i", str(FIXTURES / "grouping_and_normalisation.csv"), "-o", str(zero_out),
+        "--min-count", "0",
+    )
+
+    assert default_result.returncode == 0
+    assert zero_result.returncode == 0
+    assert as_comparable(read_rows(default_out)) == as_comparable(read_rows(zero_out))
+
+
+def test_default_behaviour_unchanged_without_min_count_flag(tmp_path):
+    out = tmp_path / "summary.csv"
+    result = run_cli("-i", str(FIXTURES / "grouping_and_normalisation.csv"), "-o", str(out))
+
+    assert result.returncode == 0
+    groups = as_comparable(read_rows(out))
+
+    assert ("auth", "INFO") in groups
+    assert ("Auth", "INFO") in groups
+    assert ("payments", "ERROR") in groups
+
+
+def test_min_count_on_header_only_input_still_exits_0(tmp_path):
+    out = tmp_path / "summary.csv"
+    result = run_cli(
+        "-i", str(FIXTURES / "header_only.csv"), "-o", str(out), "--min-count", "5"
+    )
+
+    assert result.returncode == 0
+    assert read_header(out) == EXPECTED_HEADER
+    assert read_rows(out) == []
+
+
+def test_non_integer_min_count_is_fatal_error_exit_1(tmp_path):
+    out = tmp_path / "summary.csv"
+    result = run_cli(
+        "-i", str(FIXTURES / "header_only.csv"), "-o", str(out), "--min-count", "abc"
+    )
+
+    assert result.returncode == 1
