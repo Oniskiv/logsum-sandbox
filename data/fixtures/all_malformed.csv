@@ -1,0 +1,3 @@
+timestamp,level,service,message
+not-a-timestamp,INFO,auth,bad
+also-bad,ERROR,payments,also bad
