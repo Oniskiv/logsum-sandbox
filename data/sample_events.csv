@@ -1,0 +1,7 @@
+timestamp,level,service,message
+2026-01-01T08:00:00,INFO,auth,User login succeeded
+2026-01-01T08:05:00,INFO,auth,User login succeeded again
+2026-01-01T09:00:00,ERROR,payments,Card declined
+not-a-timestamp,WARN,search,Slow query detected
+2026-01-01T10:00:00,DEBUG,search,Query completed
+2026-01-01T10:30:00,,search,Health check ping

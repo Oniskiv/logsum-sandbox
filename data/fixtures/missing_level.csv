@@ -1,0 +1,4 @@
+timestamp,level,service,message
+2026-01-01T10:00:00,,search,ping
+2026-01-01T10:05:00,   ,search,ping2
+2026-01-01T10:10:00,INFO,search,normal

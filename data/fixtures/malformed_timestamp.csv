@@ -1,0 +1,5 @@
+timestamp,level,service,message
+2026-01-01T08:00:00,INFO,auth,ok
+not-a-timestamp,INFO,auth,bad row should be skipped
+2026-01-01T08:05:00,INFO,auth,ok again
+also-bad,ERROR,payments,this whole group is malformed
