@@ -79,7 +79,7 @@ def write_summary(path: Path, groups: dict[tuple[str, str], dict]) -> None:
             )
 
 
-def run(input_path: Path, output_path: Path) -> int:
+def run(input_path: Path, output_path: Path, min_count: int | None = None) -> int:
     try:
         input_file = input_path.open("r", newline="", encoding="utf-8")
     except OSError as exc:
@@ -99,6 +99,9 @@ def run(input_path: Path, output_path: Path) -> int:
             )
             return 1
         groups, skipped = summarise(reader)
+
+    if min_count is not None:
+        groups = {key: stats for key, stats in groups.items() if stats["count"] >= min_count}
 
     try:
         write_summary(output_path, groups)
@@ -127,13 +130,19 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "-o", "--output", default="summary.csv", help="path to write the output (default: summary.csv)"
     )
+    parser.add_argument(
+        "--min-count",
+        type=int,
+        default=None,
+        help="only output groups with count >= N (default: no filtering)",
+    )
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(sys.argv[1:] if argv is None else argv)
-    return run(Path(args.input), Path(args.output))
+    return run(Path(args.input), Path(args.output), args.min_count)
 
 
 if __name__ == "__main__":
