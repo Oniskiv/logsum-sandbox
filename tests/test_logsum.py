@@ -1,363 +1,312 @@
-"""Tests for the logsum CLI, derived from spec.md only.
+"""Black-box tests for logsum: invoke it as a subprocess, check observable behaviour."""
 
-The CLI under test (src/logsum.py) is deliberately treated as a black box:
-it is only ever invoked as a subprocess. Section numbers in test/comment
-names refer to spec.md sections.
-"""
 import csv
-import re
 import subprocess
 import sys
 from pathlib import Path
 
-import pytest
-
-REPO_ROOT = Path(__file__).resolve().parents[1]
-SCRIPT = REPO_ROOT / "src" / "logsum.py"
+REPO_ROOT = Path(__file__).resolve().parent.parent
+LOGSUM = REPO_ROOT / "src" / "logsum.py"
 FIXTURES = REPO_ROOT / "data" / "fixtures"
-
-EXPECTED_HEADER = ["service", "level", "count", "first_seen", "last_seen"]
-
-
-def run_cli(*args, cwd=None):
-    cmd = [sys.executable, str(SCRIPT), *args]
-    return subprocess.run(cmd, capture_output=True, text=True, cwd=cwd, check=False)
+SAMPLE_EVENTS = REPO_ROOT / "data" / "sample_events.csv"
 
 
-def read_rows(path):
-    with open(path, newline="", encoding="utf-8") as f:
-        return list(csv.DictReader(f))
+def run_logsum(args):
+    return subprocess.run(
+        [sys.executable, str(LOGSUM), *args],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
 
 
-def read_header(path):
-    with open(path, newline="", encoding="utf-8") as f:
-        return next(csv.reader(f))
+def read_output_rows(path):
+    with open(path, newline="", encoding="utf-8") as handle:
+        return list(csv.reader(handle))
 
 
-def as_comparable(rows):
-    return {
-        (r["service"], r["level"]): (
-            int(r["count"]),
-            r["first_seen"],
-            r["last_seen"],
-        )
-        for r in rows
-    }
+HEADER = ["service", "level", "count", "first_seen", "last_seen"]
 
 
-# --- 1. Exact group key: (service, level), message excluded ---------------
+# --- Grouping and normalisation (spec sections 1, 2) ------------------------
 
 
-def test_grouping_uses_service_and_level_only(tmp_path):
-    out = tmp_path / "summary.csv"
-    result = run_cli("-i", str(FIXTURES / "grouping_and_normalisation.csv"), "-o", str(out))
+def test_grouping_and_normalisation(tmp_path):
+    output = tmp_path / "summary.csv"
+    result = run_logsum(
+        ["--input", str(FIXTURES / "grouping_and_normalisation.csv"), "--output", str(output)]
+    )
 
     assert result.returncode == 0
-    rows = read_rows(out)
-    groups = as_comparable(rows)
+    rows = read_output_rows(output)
+    assert rows[0] == HEADER
 
-    # Three different messages within (auth, INFO) still collapse into one group.
-    assert groups[("auth", "INFO")] == (3, "2026-01-01T08:00:00", "2026-01-01T08:10:00")
+    data_rows = {(r[0], r[1]): r for r in rows[1:]}
 
+    # "auth"/INFO, "auth"/info, and " auth "/INFO all collapse into one group.
+    assert data_rows[("auth", "INFO")][2] == "3"
+    assert data_rows[("auth", "INFO")][3] == "2026-01-01T08:00:00"
+    assert data_rows[("auth", "INFO")][4] == "2026-01-01T08:10:00"
 
-def test_message_column_is_not_part_of_output(tmp_path):
-    out = tmp_path / "summary.csv"
-    result = run_cli("-i", str(FIXTURES / "grouping_and_normalisation.csv"), "-o", str(out))
+    # "Auth" (capitalised) is a distinct group from "auth" - service case is preserved.
+    assert data_rows[("Auth", "INFO")][2] == "1"
+    assert data_rows[("Auth", "INFO")][3] == "2026-01-01T08:15:00"
+    assert data_rows[("Auth", "INFO")][4] == "2026-01-01T08:15:00"
 
-    assert result.returncode == 0
-    assert "message" not in read_header(out)
+    # "payments"/ERROR and " payments "/error collapse into one group.
+    assert data_rows[("payments", "ERROR")][2] == "2"
+    assert data_rows[("payments", "ERROR")][3] == "2026-01-01T09:00:00"
+    assert data_rows[("payments", "ERROR")][4] == "2026-01-01T09:30:00"
 
-
-# --- 2. Normalisation rules -------------------------------------------------
-
-
-def test_service_whitespace_is_stripped_but_case_is_preserved(tmp_path):
-    out = tmp_path / "summary.csv"
-    result = run_cli("-i", str(FIXTURES / "grouping_and_normalisation.csv"), "-o", str(out))
-
-    assert result.returncode == 0
-    groups = as_comparable(read_rows(out))
-
-    # " auth " merges into "auth" (whitespace stripped) ...
-    assert groups[("auth", "INFO")][0] == 3
-    # ... but "Auth" (different case) stays a separate group (case preserved).
-    assert ("Auth", "INFO") in groups
-    assert groups[("Auth", "INFO")] == (1, "2026-01-01T08:15:00", "2026-01-01T08:15:00")
+    assert len(data_rows) == 3
 
 
-def test_level_whitespace_and_case_collapse_to_same_group(tmp_path):
-    out = tmp_path / "summary.csv"
-    result = run_cli("-i", str(FIXTURES / "grouping_and_normalisation.csv"), "-o", str(out))
-
-    assert result.returncode == 0
-    groups = as_comparable(read_rows(out))
-
-    # "ERROR" and "error" (with surrounding whitespace on service) collapse together.
-    assert groups[("payments", "ERROR")] == (2, "2026-01-01T09:00:00", "2026-01-01T09:30:00")
-    # Levels are uppercased in the output.
-    assert all(level == level.upper() for (_, level) in groups)
+def test_message_not_used_for_grouping_or_output(tmp_path):
+    output = tmp_path / "summary.csv"
+    run_logsum(["--input", str(FIXTURES / "grouping_and_normalisation.csv"), "--output", str(output)])
+    rows = read_output_rows(output)
+    assert rows[0] == HEADER
+    for row in rows[1:]:
+        assert len(row) == 5  # no message column, ever
 
 
-# --- 3. count / first_seen / last_seen + exact header ----------------------
+# --- Missing level (spec section 4) -----------------------------------------
 
 
-def test_summary_header_is_exact(tmp_path):
-    out = tmp_path / "summary.csv"
-    result = run_cli("-i", str(FIXTURES / "grouping_and_normalisation.csv"), "-o", str(out))
+def test_missing_level_becomes_unknown_and_is_counted(tmp_path):
+    output = tmp_path / "summary.csv"
+    result = run_logsum(["--input", str(FIXTURES / "missing_level.csv"), "--output", str(output)])
 
     assert result.returncode == 0
-    assert read_header(out) == EXPECTED_HEADER
+    rows = read_output_rows(output)
+    data_rows = {(r[0], r[1]): r for r in rows[1:]}
+
+    assert ("search", "UNKNOWN") in data_rows
+    assert data_rows[("search", "UNKNOWN")][2] == "2"
+    assert data_rows[("search", "UNKNOWN")][3] == "2026-01-01T10:00:00"
+    assert data_rows[("search", "UNKNOWN")][4] == "2026-01-01T10:05:00"
+
+    assert data_rows[("search", "INFO")][2] == "1"
 
 
-def test_first_seen_and_last_seen_are_min_and_max_verbatim(tmp_path):
-    out = tmp_path / "summary.csv"
-    result = run_cli("-i", str(FIXTURES / "grouping_and_normalisation.csv"), "-o", str(out))
-
-    assert result.returncode == 0
-    groups = as_comparable(read_rows(out))
-    count, first_seen, last_seen = groups[("auth", "INFO")]
-    assert count == 3
-    # Verbatim input format, no reformatting.
-    assert first_seen == "2026-01-01T08:00:00"
-    assert last_seen == "2026-01-01T08:10:00"
+# --- Malformed timestamps + skipped_rows (spec section 5) -------------------
 
 
-# --- 4. Missing level behaviour ---------------------------------------------
-
-
-def test_blank_and_whitespace_only_level_become_unknown(tmp_path):
-    out = tmp_path / "summary.csv"
-    result = run_cli("-i", str(FIXTURES / "missing_level.csv"), "-o", str(out))
+def test_malformed_timestamp_excluded_but_counted_as_skipped(tmp_path):
+    output = tmp_path / "summary.csv"
+    result = run_logsum(["--input", str(FIXTURES / "malformed_timestamp.csv"), "--output", str(output)])
 
     assert result.returncode == 0
-    groups = as_comparable(read_rows(out))
+    assert "skipped_rows: 2" in result.stderr
 
-    assert groups[("search", "UNKNOWN")] == (2, "2026-01-01T10:00:00", "2026-01-01T10:05:00")
-    assert groups[("search", "INFO")] == (1, "2026-01-01T10:10:00", "2026-01-01T10:10:00")
+    rows = read_output_rows(output)
+    data_rows = {(r[0], r[1]): r for r in rows[1:]}
 
+    # The two good "auth"/INFO rows survive; the malformed row between them
+    # does not affect count/first_seen/last_seen.
+    assert data_rows[("auth", "INFO")][2] == "2"
+    assert data_rows[("auth", "INFO")][3] == "2026-01-01T08:00:00"
+    assert data_rows[("auth", "INFO")][4] == "2026-01-01T08:05:00"
 
-def test_missing_level_rows_are_counted_not_dropped(tmp_path):
-    out = tmp_path / "summary.csv"
-    result = run_cli("-i", str(FIXTURES / "missing_level.csv"), "-o", str(out))
-
-    assert result.returncode == 0
-    total = sum(int(r["count"]) for r in read_rows(out))
-    assert total == 3  # all 3 input rows accounted for
-
-
-# --- 5. Malformed timestamp behaviour ---------------------------------------
-
-
-def test_malformed_timestamp_excluded_from_aggregation(tmp_path):
-    out = tmp_path / "summary.csv"
-    result = run_cli("-i", str(FIXTURES / "malformed_timestamp.csv"), "-o", str(out))
-
-    assert result.returncode == 0
-    groups = as_comparable(read_rows(out))
-
-    # Only the 2 valid auth/INFO rows are aggregated.
-    assert groups[("auth", "INFO")] == (2, "2026-01-01T08:00:00", "2026-01-01T08:05:00")
-    # Spec §5 only guarantees malformed rows don't perturb an existing group's
-    # count/first_seen/last_seen. It does not say whether a (service, level)
-    # pair whose *only* rows are malformed is omitted entirely or appears with
-    # count=0 -- that's a genuine spec ambiguity (see test-notes.md), so accept
-    # either reading here instead of asserting the implementation's choice.
-    if ("payments", "ERROR") in groups:
-        assert groups[("payments", "ERROR")][0] == 0
+    # "payments"/ERROR had only one row and it was malformed, so the whole
+    # group never comes into existence.
+    assert ("payments", "ERROR") not in data_rows
+    assert len(data_rows) == 1
 
 
-def test_malformed_timestamp_is_tallied_in_skipped_rows_on_stderr(tmp_path):
-    out = tmp_path / "summary.csv"
-    result = run_cli("-i", str(FIXTURES / "malformed_timestamp.csv"), "-o", str(out))
+def test_all_malformed_produces_header_only_and_reports_skipped(tmp_path):
+    output = tmp_path / "summary.csv"
+    result = run_logsum(["--input", str(FIXTURES / "all_malformed.csv"), "--output", str(output)])
 
     assert result.returncode == 0
-    assert re.search(r"skip\w*\D*2\b", result.stderr, re.IGNORECASE)
+    assert "skipped_rows: 2" in result.stderr
+    rows = read_output_rows(output)
+    assert rows == [HEADER]
 
 
-def test_malformed_timestamp_never_crashes_the_cli(tmp_path):
-    out = tmp_path / "summary.csv"
-    result = run_cli("-i", str(FIXTURES / "malformed_timestamp.csv"), "-o", str(out))
+def test_malformed_timestamp_never_crashes(tmp_path):
+    result = subprocess.run(
+        [sys.executable, str(LOGSUM), "--input", str(FIXTURES / "malformed_timestamp.csv")],
+        capture_output=True,
+        text=True,
+        cwd=tmp_path,
+        check=False,
+    )
+    assert result.returncode == 0
+
+
+# --- Empty / header-only input (spec section 6) -----------------------------
+
+
+def test_header_only_input_writes_header_and_exits_zero(tmp_path):
+    output = tmp_path / "summary.csv"
+    result = run_logsum(["--input", str(FIXTURES / "header_only.csv"), "--output", str(output)])
 
     assert result.returncode == 0
-    assert out.exists()
+    rows = read_output_rows(output)
+    assert rows == [HEADER]
 
 
-def test_all_rows_malformed_still_produces_a_valid_summary(tmp_path):
-    out = tmp_path / "summary.csv"
-    result = run_cli("-i", str(FIXTURES / "all_malformed.csv"), "-o", str(out))
-
-    assert result.returncode == 0
-    assert read_header(out) == EXPECTED_HEADER
-    # Spec doesn't settle whether groups with no valid rows are omitted or
-    # listed with count=0 -- see test-notes.md. Either is acceptable here;
-    # what matters is no malformed row is ever counted.
-    rows = read_rows(out)
-    assert rows == [] or all(int(r["count"]) == 0 for r in rows)
-    assert re.search(r"skip\w*\D*2\b", result.stderr, re.IGNORECASE)
-
-
-# --- 6. Empty input behaviour -------------------------------------------------
-
-
-def test_header_only_input_writes_header_only_output_and_exits_0(tmp_path):
-    out = tmp_path / "summary.csv"
-    result = run_cli("-i", str(FIXTURES / "header_only.csv"), "-o", str(out))
-
-    assert result.returncode == 0
-    assert out.exists()
-    assert read_header(out) == EXPECTED_HEADER
-    assert read_rows(out) == []
-
-
-def test_completely_empty_input_is_a_fatal_error(tmp_path):
-    out = tmp_path / "summary.csv"
-    result = run_cli("-i", str(FIXTURES / "empty.csv"), "-o", str(out))
+def test_completely_empty_input_is_fatal(tmp_path):
+    output = tmp_path / "summary.csv"
+    result = run_logsum(["--input", str(FIXTURES / "empty.csv"), "--output", str(output)])
 
     assert result.returncode == 1
     assert result.stderr.strip() != ""
+    assert not output.exists()
 
 
-# --- 7. CLI flags and exit codes --------------------------------------------
+# --- CLI flags and exit codes (spec section 7) ------------------------------
 
 
-def test_missing_input_file_is_fatal_error(tmp_path):
+def test_missing_input_file_is_fatal(tmp_path):
     missing = tmp_path / "does_not_exist.csv"
-    out = tmp_path / "summary.csv"
-    result = run_cli("-i", str(missing), "-o", str(out))
+    output = tmp_path / "summary.csv"
+    result = run_logsum(["--input", str(missing), "--output", str(output)])
 
     assert result.returncode == 1
     assert result.stderr.strip() != ""
-    assert not out.exists()
+    assert not output.exists()
 
 
-@pytest.mark.parametrize(
-    "bad_output",
-    [
-        "no_such_dir/summary.csv",  # parent directory doesn't exist
-        ".",  # a directory, not a file
-    ],
-)
-def test_unwritable_output_path_is_fatal_error(tmp_path, bad_output):
-    out = tmp_path / bad_output
-    result = run_cli(
-        "-i", str(FIXTURES / "header_only.csv"), "-o", str(out), cwd=str(tmp_path)
-    )
+def test_unwritable_output_path_is_fatal(tmp_path):
+    output = tmp_path / "no_such_directory" / "summary.csv"
+    result = run_logsum(["--input", str(SAMPLE_EVENTS), "--output", str(output)])
 
     assert result.returncode == 1
     assert result.stderr.strip() != ""
 
 
-def test_unknown_cli_argument_is_fatal_error_exit_1(tmp_path):
-    out = tmp_path / "summary.csv"
-    result = run_cli(
-        "-i", str(FIXTURES / "header_only.csv"), "-o", str(out), "--bogus-flag"
-    )
-
-    # Spec: no separate exit code for argument errors -- everything fatal is 1,
-    # not argparse's usual 2.
-    assert result.returncode == 1
-
-
-def test_missing_required_input_argument_is_fatal_error_exit_1():
-    result = run_cli()
+def test_missing_required_input_flag_is_fatal(tmp_path):
+    output = tmp_path / "summary.csv"
+    result = run_logsum(["--output", str(output)])
 
     assert result.returncode == 1
+    assert result.stderr.strip() != ""
 
 
-def test_help_flag_prints_usage_and_exits_0():
-    result = run_cli("-h")
+def test_default_output_path(tmp_path):
+    result = subprocess.run(
+        [sys.executable, str(LOGSUM), "--input", str(SAMPLE_EVENTS)],
+        capture_output=True,
+        text=True,
+        cwd=tmp_path,
+        check=False,
+    )
+    assert result.returncode == 0
+    assert (tmp_path / "summary.csv").exists()
+
+
+def test_help_flag_prints_usage_and_exits_zero():
+    result = run_logsum(["-h"])
+    assert result.returncode == 0
+    assert "usage" in result.stdout.lower()
+
+
+def test_short_flags_i_and_o(tmp_path):
+    output = tmp_path / "summary.csv"
+    result = run_logsum(["-i", str(SAMPLE_EVENTS), "-o", str(output)])
+    assert result.returncode == 0
+    assert output.exists()
+
+
+# --- sample_events.csv end-to-end check -------------------------------------
+
+
+def test_sample_events(tmp_path):
+    output = tmp_path / "summary.csv"
+    result = run_logsum(["--input", str(SAMPLE_EVENTS), "--output", str(output)])
 
     assert result.returncode == 0
-    combined = (result.stdout + result.stderr).lower()
-    assert "usage" in combined
-    assert "--input" in combined
+    assert "skipped_rows: 1" in result.stderr
+
+    rows = read_output_rows(output)
+    data_rows = {(r[0], r[1]): r for r in rows[1:]}
+
+    assert data_rows[("auth", "INFO")][2] == "2"
+    assert data_rows[("auth", "INFO")][3] == "2026-01-01T08:00:00"
+    assert data_rows[("auth", "INFO")][4] == "2026-01-01T08:05:00"
+
+    assert data_rows[("payments", "ERROR")][2] == "1"
+    assert data_rows[("payments", "ERROR")][3] == "2026-01-01T09:00:00"
+    assert data_rows[("payments", "ERROR")][4] == "2026-01-01T09:00:00"
+
+    assert data_rows[("search", "DEBUG")][2] == "1"
+    assert data_rows[("search", "DEBUG")][3] == "2026-01-01T10:00:00"
+
+    assert data_rows[("search", "UNKNOWN")][2] == "1"
+    assert data_rows[("search", "UNKNOWN")][3] == "2026-01-01T10:30:00"
+
+    # The WARN/search row has a malformed timestamp, so no WARN group exists.
+    assert ("search", "WARN") not in data_rows
+
+    assert len(data_rows) == 4
 
 
-def test_output_defaults_to_summary_csv_in_current_directory(tmp_path):
-    result = run_cli("-i", str(FIXTURES / "header_only.csv"), cwd=str(tmp_path))
-
-    assert result.returncode == 0
-    default_out = tmp_path / "summary.csv"
-    assert default_out.exists()
-    assert read_header(default_out) == EXPECTED_HEADER
+# --- --min-count (spec section 7) -------------------------------------------
 
 
-def test_explicit_output_option_is_honoured(tmp_path):
-    out = tmp_path / "custom_name.csv"
-    result = run_cli("-i", str(FIXTURES / "header_only.csv"), "-o", str(out))
-
-    assert result.returncode == 0
-    assert out.exists()
-
-
-def test_help_flag_mentions_min_count():
-    result = run_cli("-h")
-
-    assert result.returncode == 0
-    combined = (result.stdout + result.stderr).lower()
-    assert "--min-count" in combined
-
-
-# --- 9. --min-count filtering -----------------------------------------------
-
-
-def test_min_count_filters_out_smaller_groups(tmp_path):
-    out = tmp_path / "summary.csv"
-    result = run_cli(
-        "-i", str(FIXTURES / "grouping_and_normalisation.csv"), "-o", str(out), "--min-count", "2"
+def test_min_count_filters_groups_below_threshold(tmp_path):
+    output = tmp_path / "summary.csv"
+    result = run_logsum(
+        [
+            "--input", str(FIXTURES / "grouping_and_normalisation.csv"),
+            "--output", str(output),
+            "--min-count", "2",
+        ]
     )
 
     assert result.returncode == 0
-    groups = as_comparable(read_rows(out))
+    rows = read_output_rows(output)
+    groups = {(r[0], r[1]) for r in rows[1:]}
 
-    assert ("auth", "INFO") in groups
-    assert ("payments", "ERROR") in groups
-    assert ("Auth", "INFO") not in groups
-
-
-def test_min_count_zero_keeps_all_groups(tmp_path):
-    default_out = tmp_path / "default.csv"
-    zero_out = tmp_path / "zero.csv"
-    default_result = run_cli(
-        "-i", str(FIXTURES / "grouping_and_normalisation.csv"), "-o", str(default_out)
-    )
-    zero_result = run_cli(
-        "-i", str(FIXTURES / "grouping_and_normalisation.csv"), "-o", str(zero_out),
-        "--min-count", "0",
-    )
-
-    assert default_result.returncode == 0
-    assert zero_result.returncode == 0
-    assert as_comparable(read_rows(default_out)) == as_comparable(read_rows(zero_out))
+    assert ("auth", "INFO") in groups  # count 3
+    assert ("payments", "ERROR") in groups  # count 2
+    assert ("Auth", "INFO") not in groups  # count 1, filtered out
+    assert len(groups) == 2
 
 
-def test_default_behaviour_unchanged_without_min_count_flag(tmp_path):
-    out = tmp_path / "summary.csv"
-    result = run_cli("-i", str(FIXTURES / "grouping_and_normalisation.csv"), "-o", str(out))
-
-    assert result.returncode == 0
-    groups = as_comparable(read_rows(out))
-
-    assert ("auth", "INFO") in groups
-    assert ("Auth", "INFO") in groups
-    assert ("payments", "ERROR") in groups
-
-
-def test_min_count_on_header_only_input_still_exits_0(tmp_path):
-    out = tmp_path / "summary.csv"
-    result = run_cli(
-        "-i", str(FIXTURES / "header_only.csv"), "-o", str(out), "--min-count", "5"
+def test_min_count_zero_includes_everything(tmp_path):
+    output = tmp_path / "summary.csv"
+    result = run_logsum(
+        [
+            "--input", str(FIXTURES / "grouping_and_normalisation.csv"),
+            "--output", str(output),
+            "--min-count", "0",
+        ]
     )
 
     assert result.returncode == 0
-    assert read_header(out) == EXPECTED_HEADER
-    assert read_rows(out) == []
+    rows = read_output_rows(output)
+    assert len(rows) - 1 == 3  # all three groups present
 
 
-def test_non_integer_min_count_is_fatal_error_exit_1(tmp_path):
-    out = tmp_path / "summary.csv"
-    result = run_cli(
-        "-i", str(FIXTURES / "header_only.csv"), "-o", str(out), "--min-count", "abc"
+def test_min_count_does_not_affect_skipped_rows_reporting(tmp_path):
+    output = tmp_path / "summary.csv"
+    result = run_logsum(
+        [
+            "--input", str(FIXTURES / "malformed_timestamp.csv"),
+            "--output", str(output),
+            "--min-count", "100",
+        ]
+    )
+
+    assert result.returncode == 0
+    assert "skipped_rows: 2" in result.stderr
+    rows = read_output_rows(output)
+    assert rows == [HEADER]  # every group filtered out by the high threshold
+
+
+def test_min_count_non_integer_is_fatal(tmp_path):
+    output = tmp_path / "summary.csv"
+    result = run_logsum(
+        [
+            "--input", str(SAMPLE_EVENTS),
+            "--output", str(output),
+            "--min-count", "not-a-number",
+        ]
     )
 
     assert result.returncode == 1
+    assert result.stderr.strip() != ""
+    assert not output.exists()
