@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "deny": [
+      "Edit(spec.md)",
+      "Write(spec.md)"
+    ]
+  }
+}
